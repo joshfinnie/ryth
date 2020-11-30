@@ -1,80 +1,261 @@
-use pest::{self, Parser};
+use crate::lexer::Token;
 
-use crate::ast::{Node, Operator};
-
-#[derive(pest_derive::Parser)]
-#[grammar = "grammar.pest"]
-struct CalcParser;
-
-pub fn parse(source: &str) -> std::result::Result<Vec<Node>, pest::error::Error<Rule>> {
-    let mut ast = vec![];
-    let pairs = CalcParser::parse(Rule::Program, source)?;
-    for pair in pairs {
-        if let Rule::Expr = pair.as_rule() {
-            ast.push(build_ast_from_expr(pair));
-        }
-    }
-    Ok(ast)
+#[derive(Debug, PartialEq, Clone)]
+pub enum Statement {
+    Expression(Expr),
 }
 
-fn build_ast_from_expr(pair: pest::iterators::Pair<Rule>) -> Node {
-    match pair.as_rule() {
-        Rule::Expr => build_ast_from_expr(pair.into_inner().next().unwrap()),
-        Rule::UnaryExpr => {
-            let mut pair = pair.into_inner();
-            let op = pair.next().unwrap();
-            let child = pair.next().unwrap();
-            let child = build_ast_from_term(child);
-            parse_unary_expr(op, child)
-        }
-        Rule::BinaryExpr => {
-            let mut pair = pair.into_inner();
-            let lhspair = pair.next().unwrap();
-            let lhs = build_ast_from_term(lhspair);
-            let op = pair.next().unwrap();
-            let rhspair = pair.next().unwrap();
-            let rhs = build_ast_from_term(rhspair);
-            parse_binary_expr(op, lhs, rhs)
-        }
-        unknown => panic!("Unknown expr: {:?}", unknown),
-    }
+#[derive(Debug, PartialEq, Clone)]
+pub enum Expr {
+    Const(i32),
+    String(String),
+    Boolean(bool),
+    Ident(String),
+    Prefix{prefix: Prefix, value: Box<Expr>},
+    Infix{operator: Operator, left: Box<Expr>, right: Box<Expr>},
+    If{condition: Box<Expr>, consequence: Vec<Statement>, alternative: Vec<Statement>},
+    Function{parameters: Vec<String>, body: Vec<Statement>},
+    Call{function: Box<Expr>, arguments: Vec<Expr>},
 }
 
-fn build_ast_from_term(pair: pest::iterators::Pair<Rule>) -> Node {
-    match pair.as_rule() {
-        Rule::Int => {
-            let istr = pair.as_str();
-            let (sign, istr) = match &istr[..1] {
-                "-" => (-1, &istr[1..]),
-                _ => (1, &istr[..]),
+#[derive(Debug, PartialEq, Clone)]
+pub enum Prefix {
+    Bang,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Operator {
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    GreaterThan,
+    LessThan,
+    Equals,
+    NotEquals,
+}
+
+#[derive(PartialOrd, PartialEq)]
+enum Precedence {
+    Lowest,
+    Equals,
+    LessGreater,
+    Sum,
+    Difference,
+    Product,
+    Prefix,
+}
+
+pub fn parse(input: &mut Vec<Token>) -> Vec<Statement> {
+	let mut program = vec![];
+
+    loop {
+        let token = &input[0];
+
+        match token {
+            Token::EOF => break,
+            Token::RBRACE => break,
+            _ => program.push(
+                Statement::Expression(
+                    parse_expression(input, Precedence::Lowest)
+                )
+            )
+        }
+
+        assert_eq!(Token::SEMICOLON, input.remove(0));
+    }
+
+    program
+}
+
+fn parse_expression(input: &mut Vec<Token>, precedence: Precedence) -> Expr {
+    let mut left_expr = match input.remove(0) {
+        Token::INT(value) => Expr::Const(value),
+        Token::TRUE => Expr::Boolean(true),
+        Token::FALSE => Expr::Boolean(false),
+        Token::TEN => Expr::Const(10),
+        Token::ZERO => Expr::Const(0),
+        Token::IDENT(value) => {
+            if &input[0] == &Token::LPAREN {
+                input.remove(0);
+                let mut args = vec![];
+                loop {
+                    match &input[0] {
+                        Token::RPAREN => {
+                            input.remove(0);
+                            break
+                        },
+                        _ => {
+                            args.push(parse_expression(input, Precedence::Lowest));
+                        },
+                   }
+
+                   match input.remove(0) {
+                       Token::RPAREN => break,
+                       Token::COMMA => continue,
+                       _ => panic!("Unexpected parameter found while parsing function args."),
+                   }
+                }
+                Expr::Call {
+                    function: Box::new(Expr::Ident(value)),
+                    arguments: args
+                }
+            } else {
+                Expr::Ident(value)
+            }
+        },
+        Token::BANG => Expr::Prefix{
+            prefix: Prefix::Bang,
+            value: Box::new(parse_expression(input, Precedence::Prefix))
+        },
+        Token::MINUS => Expr::Prefix{
+            prefix: Operator::Minus,
+            value: Box::new(parse_expression(input, Precedence::Difference))
+        },
+        Token::PLUS => Expr::Prefix{
+            prefix: Operator::Plus,
+            value: Box::new(parse_expression(input, Precedence::Sum))
+        },
+        Token::LPAREN => {
+            let expr = parse_expression(input, Precedence::Lowest);
+            assert_eq!(Token::RPAREN, input.remove(0));
+
+            expr
+        },
+        Token::IF => {
+            assert_eq!(Token::LPAREN, input.remove(0));
+            let condition = parse_expression(input, Precedence::Lowest);
+            assert_eq!(Token::RPAREN, input.remove(0));
+
+            assert_eq!(Token::LBRACE, input.remove(0));
+            let consequence = parse(input);
+            assert_eq!(Token::RBRACE, input.remove(0));
+
+            let alternative = if &input[0] == &Token::ELSE {
+                input.remove(0);
+
+                assert_eq!(Token::LBRACE, input.remove(0));
+                let alternative = parse(input);
+                assert_eq!(Token::RBRACE, input.remove(0));
+
+                alternative
+            } else {
+                Vec::new()
             };
-            let int: i32 = istr.parse().unwrap();
-            Node::Int(sign * int)
+
+            Expr::If {
+                condition: Box::new(condition),
+                consequence,
+                alternative,
+            }
+        },
+        Token::FUNCTION => {
+            let mut parameters = vec![];
+            assert_eq!(Token::LPAREN, input.remove(0));
+            // must be idents seperated by comma, or RPAREN
+            loop {
+                match input.remove(0) {
+                    Token::RPAREN => break,
+                    Token::IDENT(ident) => {
+                        parameters.push(ident);
+                        match input.remove(0) {
+                            Token::RPAREN => break,
+                            Token::COMMA => continue,
+                            _ => panic!("unexpected parameter found while parsing function parameters"),
+                        }
+                    },
+                    _ => panic!("unexpected parameter found while parsing function parameters"),
+                }
+            }
+
+            assert_eq!(Token::LBRACE, input.remove(0));
+            let body = parse(input);
+            assert_eq!(Token::RBRACE, input.remove(0));
+
+            Expr::Function {
+                parameters,
+                body,
+            }
+        },
+        Token::STRING(string) => Expr::String(string),
+        _ => panic!("parse error at expression"),
+    };
+
+    let mut next_token = &input[0];
+    while precedence < next_token.precedence() {
+        left_expr = parse_infix(left_expr, input);
+        next_token = &input[0];
+    }
+
+    left_expr
+}
+
+fn parse_infix(left: Expr, input: &mut Vec<Token>) -> Expr {
+    let next_token = input.remove(0);
+    let operator = match &next_token {
+        Token::PLUS => Operator::Plus,
+        Token::MINUS => Operator::Minus,
+        Token::SLASH => Operator::Divide,
+        Token::ASTERISK => Operator::Multiply,
+        Token::LT => Operator::LessThan,
+        Token::GT => Operator::GreaterThan,
+        Token::EQ => Operator::Equals,
+        Token::NOT_EQ => Operator::NotEquals,
+        _ => panic!("parse infix called on invalid operator"),
+    };
+    Expr::Infix {
+        left: Box::new(left),
+        operator,
+        right: Box::new(parse_expression(input, next_token.precedence())),
+    }
+}
+
+impl Token {
+    fn precedence(&self) -> Precedence {
+        match self {
+            Token::PLUS => Precedence::Sum,
+            Token::MINUS => Precedence::Sum,
+            Token::SLASH => Precedence::Product,
+            Token::ASTERISK => Precedence::Product,
+            Token::LT => Precedence::LessGreater,
+            Token::GT => Precedence::LessGreater,
+            Token::EQ => Precedence::Equals,
+            Token::NOT_EQ => Precedence::Equals,
+            _ => Precedence::Lowest
         }
-        Rule::Expr => build_ast_from_expr(pair),
-        unknown => panic!("Unknown term: {:?}", unknown),
     }
 }
 
-fn parse_unary_expr(pair: pest::iterators::Pair<Rule>, child: Node) -> Node {
-    Node::UnaryExpr {
-        op: match pair.as_str() {
-            "+" => Operator::Plus,
-            "-" => Operator::Minus,
-            _ => unreachable!(),
-        },
-        child: Box::new(child),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
 
-fn parse_binary_expr(pair: pest::iterators::Pair<Rule>, lhs: Node, rhs: Node) -> Node {
-    Node::BinaryExpr {
-        op: match pair.as_str() {
-            "+" => Operator::Plus,
-            "-" => Operator::Minus,
-            _ => unreachable!(),
-        },
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
+    #[test]
+    fn parse_expression_statement_const() {
+        let input = "5;";
+        let mut tokens = lex(input);
+        let ast = parse(&mut tokens);
+
+        assert_eq!(
+            vec![
+                Statement::Expression(Expr::Const(5)),
+            ],
+            ast
+        );
+    }
+
+    #[test]
+    fn parse_expression_statement_addition() {
+        let input = "+5 T;";
+        let mut tokens = lex(input);
+        let ast = parse(&mut tokens);
+
+        assert_eq!(
+            vec![
+                Statement::Expression(Expr::Const(5)),
+            ],
+            ast
+        );
     }
 }
