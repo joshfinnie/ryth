@@ -180,7 +180,7 @@ mod eval {
     #[derive(Debug, PartialEq, Clone)]
     pub enum Object {
         Null,
-        Interger(i32),
+        Integer(i32),
         String(String),
         Boolean(bool),
         Return(Box<Object>),
@@ -188,23 +188,23 @@ mod eval {
 
     fn eval_expr(expr: Expr, env: &mut Env) -> Object {
         match expr {
-            Expr::Const(num) => Object::Interger(num),
+            Expr::Const(num) => Object::Integer(num),
             Expr::Operation{operator: Operator::Plus, operands} => {
                 let mut ints = vec![];
                 for operand in operands {
                     match eval_expr(operand, env) {
-                        Object::Interger(int) => ints.push(int),
+                        Object::Integer(int) => ints.push(int),
                         _ => panic!("plus operator used on invalid type."),
                     }
                 }
                 let total = ints.iter().fold(0, |mut sum, &val| {sum += val; sum});
-                Object::Interger(total)
+                Object::Integer(total)
             }
             Expr::Operation{operator: Operator::Minus, operands} => {
                 let mut ints = vec![];
                 for operand in operands {
                     match eval_expr(operand, env) {
-                        Object::Interger(int) => ints.push(int),
+                        Object::Integer(int) => ints.push(int),
                         _ => panic!("minus operator used on invalid type."),
                     }
                 }
@@ -216,7 +216,7 @@ mod eval {
                         total -= int;
                     }
                 }
-                Object::Interger(total)
+                Object::Integer(total)
             }
             _ => panic!("Not implemented yet!"),
         }
@@ -251,6 +251,16 @@ mod eval {
             _ => result,
         }
     }
+
+    pub fn display_object(obj: Object) {
+        match obj {
+            Object::Integer(num) => println!("{}", num),
+            Object::String(string) => println!("{}", string),
+            Object::Boolean(val) => println!("{}", val),
+            Object::Null => println!("null"),
+            Object::Return(obj) => display_object(*obj),
+        }
+    }
 }
 
 fn main() {
@@ -263,26 +273,9 @@ fn main() {
     }
 
     let code = &fs::read_to_string(&args[1]).unwrap();
-    println!("CODE");
-    println!("{:?}", code);
 
-    for c in code.split("\n") {
-        let mut tokens = lexer::lex(&c);
-        let parsed = parser::parse(&mut tokens);
-        let evaled = eval::eval_return_scope(parsed, &mut env);
-        println!("EVALUATED");
-        println!("{:?}", evaled);
-    }
-
-    //let mut tokens = lexer::lex(&code);
-    //println!("TOKENS");
-    //println!("{:?}", tokens);
-
-    //let parsed = parser::parse(&mut tokens);
-    //println!("PARSED AST");
-    //println!("{:?}", parsed);
-
-    //let evaled = eval::eval_return_scope(parsed, &mut env);
-    //println!("EVALUATED");
-    //println!("{:?}", evaled);
+    let mut tokens = lexer::lex(&code);
+    let parsed = parser::parse(&mut tokens);
+    let evaled = eval::eval_return_scope(parsed, &mut env);
+    eval::display_object(evaled);
 }
