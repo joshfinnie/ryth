@@ -1,4 +1,5 @@
 use std::{env, fs};
+use std::io::{self, Read};
 
 mod lexer {
     use logos::Logos;
@@ -14,6 +15,10 @@ mod lexer {
         IDENT(String),
         #[regex("[0-9]+", |lexer| lexer.slice().parse())]
         INT(i32),
+        #[regex(r#""[^"]*""#, |lexer| lexer.slice()[1..(lexer.slice().len()-1)].to_owned())]
+        STRING(String),
+        #[token(",")]
+        COMMA,
         #[token(";")]
         SEMICOLON,
         #[token("+")]
@@ -28,10 +33,26 @@ mod lexer {
         LPAREN,
         #[token(")")]
         RPAREN,
+        #[token("{")]
+        LBRACE,
+        #[token("}")]
+        RBRACE,
         #[token("Z")]
         ZERO,
         #[token("T")]
         TEN,
+        #[token("==")]
+        EQ,
+        #[token("!=")]
+        NOTEQ,
+        #[token("F")]
+        FUNCTION,
+        #[token("true")]
+        TRUE,
+        #[token("false")]
+        FALSE,
+        #[token("!")]
+        BANG,
     }
 
     pub fn lex(input: &str) -> Vec<Token> {
@@ -52,19 +73,30 @@ mod parser {
 
     #[derive(Debug, PartialEq, Clone)]
     pub enum Expr {
-        Const(i32),
-        String(String),
         Boolean(bool),
+        Call{function: Box<Expr>, arguments: Vec<Expr>},
+        Const(i32),
+        Function{parameters: Vec<String>, body: Vec<Statement>},
         Ident(String),
-        Operation{operator: Operator, operands: Vec<Expr>}
+        Operation{operator: Operator, operands: Vec<Expr>},
+        Prefix{prefix: Prefix, value: Box<Expr>},
+        String(String),
+    }
+
+    #[derive(Debug, PartialEq, Clone)]
+    pub enum Prefix {
+        Bang,
+        Minus,
     }
 
     #[derive(Debug, PartialEq, Clone)]
     pub enum Operator {
-        Plus,
+        Divide,
+        Equals,
         Minus,
         Multiply,
-        Divide,
+        NotEquals,
+        Plus,
     }
 
     #[derive(Debug, PartialOrd, PartialEq)]
@@ -73,6 +105,7 @@ mod parser {
         Equals,
         Sum,
         Product,
+        Prefix,
     }
 
     impl Token {
@@ -82,6 +115,8 @@ mod parser {
                 Token::MINUS => Precedence::Sum,
                 Token::SLASH => Precedence::Product,
                 Token::ASTERISK => Precedence::Product,
+                Token::EQ => Precedence::Equals,
+                Token::NOTEQ => Precedence::Equals,
                 _ => Precedence::Lowest
             }
         }
@@ -113,8 +148,80 @@ mod parser {
             Token::INT(value) => Expr::Const(value),
             Token::TEN => Expr::Const(10),
             Token::ZERO => Expr::Const(0),
+            Token::TRUE => Expr::Boolean(true),
+            Token::FALSE => Expr::Boolean(false),
+            Token::BANG => Expr::Prefix{
+                prefix: Prefix::Bang,
+                value: Box::new(parse_expression(input, Precedence::Prefix))
+            },
+            Token::LPAREN => {
+                let expr = parse_expression(input, Precedence::Lowest);
+                assert_eq!(Token::RPAREN, input.remove(0));
+
+                expr
+            },
             Token::PLUS => parse_operation(Token::PLUS, input),
             Token::MINUS => parse_operation(Token::MINUS, input),
+            Token::ASTERISK => parse_operation(Token::ASTERISK, input),
+            Token::SLASH => parse_operation(Token::SLASH, input),
+            Token::IDENT(ident) => {
+                if &input[0] == &Token::LPAREN {
+                    input.remove(0);
+                    let mut args = vec![];
+                    loop {
+                        match &input[0] {
+                            Token::RPAREN => {
+                                input.remove(0);
+                                break
+                            },
+                            _ => {
+                                args.push(parse_expression(input, Precedence::Lowest));
+                            },
+                        }
+
+                        match input.remove(0) {
+                            Token::RPAREN => break,
+                            Token::COMMA => continue,
+                            _ => panic!("unexpected parameter found while parsing function.")
+                        }
+                    }
+
+                    Expr::Call {
+                        function: Box::new(Expr::Ident(ident)),
+                        arguments: args
+                    }
+                } else {
+                    Expr::Ident(ident)
+                }
+            },
+            Token::FUNCTION => {
+                let mut parameters = vec![];
+                assert_eq!(Token::LPAREN, input.remove(0));
+                loop {
+                    match input.remove(0) {
+                        Token::RPAREN => break,
+                        Token::IDENT(ident) => {
+                            parameters.push(ident);
+                            match input.remove(0) {
+                                Token::RPAREN => break,
+                                Token::COMMA => continue,
+                                _ => panic!("unexpected parameter found in function."),
+                            }
+                        },
+                        _ => panic!("unexpected parameter found in function."),
+                    }
+                }
+
+                assert_eq!(Token::LBRACE, input.remove(0));
+                let body = parse(input);
+                assert_eq!(Token::RBRACE, input.remove(0));
+
+                Expr::Function {
+                    parameters,
+                    body,
+                }
+            },
+            Token::STRING(string) => Expr::String(string),
             _ => {
                 panic!("Unexpected parameter found while parsing function args.");
             },
@@ -129,6 +236,8 @@ mod parser {
             Token::MINUS => Operator::Minus,
             Token::SLASH => Operator::Divide,
             Token::ASTERISK => Operator::Multiply,
+            Token::EQ => Operator::Equals,
+            Token::NOTEQ => Operator::NotEquals,
             _ => panic!("Could not parse operation."),
         };
         let mut operands = vec![];
@@ -141,6 +250,9 @@ mod parser {
                 Token::TEN => operands.push(Expr::Const(10)),
                 Token::ZERO => operands.push(Expr::Const(0)),
                 Token::PLUS => operands.push(parse_operation(Token::PLUS, input)),
+                Token::MINUS => operands.push(parse_operation(Token::MINUS, input)),
+                Token::ASTERISK => operands.push(parse_operation(Token::ASTERISK, input)),
+                Token::SLASH => operands.push(parse_operation(Token::SLASH, input)),
                 _ => panic!("could not parse operation, not operating on numbers."),
             }
         }
@@ -155,7 +267,8 @@ mod parser {
 mod eval {
     use std::collections::HashMap;
 
-    use crate::parser::{Expr, Operator, Statement};
+    use crate::parser::{Expr, Prefix, Operator, Statement, parse};
+    use crate::lexer::lex;
 
     pub struct Env {
         env: HashMap<String, Object>,
@@ -184,11 +297,20 @@ mod eval {
         String(String),
         Boolean(bool),
         Return(Box<Object>),
+        Function{parameters: Vec<String>, body: Vec<Statement>},
     }
 
     fn eval_expr(expr: Expr, env: &mut Env) -> Object {
         match expr {
+            Expr::String(string) => Object::String(string),
             Expr::Const(num) => Object::Integer(num),
+            Expr::Boolean(boolean) => Object::Boolean(boolean),
+            Expr::Prefix {prefix: Prefix::Bang, value: expr} => {
+                match eval_expr(*expr, env) {
+                    Object::Boolean(boolean) => Object::Boolean(!boolean),
+                    _ => panic!("Bang Operator only valid for boolean types.")
+                }
+            },
             Expr::Operation{operator: Operator::Plus, operands} => {
                 let mut ints = vec![];
                 for operand in operands {
@@ -218,7 +340,64 @@ mod eval {
                 }
                 Object::Integer(total)
             }
+            Expr::Operation{operator: Operator::Multiply, operands} => {
+                let mut ints = vec![];
+                for operand in operands {
+                    match eval_expr(operand, env) {
+                        Object::Integer(int) => ints.push(int),
+                        _ => panic!("multiply operator used on invalid type."),
+                    }
+                }
+                let total = ints.iter().fold(1, |mut sum, &val| {sum *= val; sum});
+                Object::Integer(total)
+            },
+            // TODO: Get division to work...
+            Expr::Operation{operator: Operator::Divide, operands} => {
+                let mut ints = vec![];
+                for operand in operands {
+                    match eval_expr(operand, env) {
+                        Object::Integer(int) => ints.push(int),
+                        _ => panic!("divide operator used on invalid type."),
+                    }
+                }
+                let total = ints.iter().fold(1.0, |mut sum, &val| {sum /= val as f32; sum});
+                Object::Integer(total as i32)
+            },
+            Expr::Ident(ident) => env.get(&ident).expect("attempted access to invalid binding"),
+            Expr::Function{parameters, body} => Object::Function {parameters, body},
+            Expr::Call{function, arguments} => {
+                let (parameters, body) = match *function {
+                    Expr::Ident(func_name) => {
+                        match env.get(&func_name) {
+                            Some(Object::Function {parameters, body}) => (parameters, body),
+                            None => {
+                                let arguments = arguments.into_iter().map(|expr| eval_expr(expr, env)).collect();
+                                return eval_builtin(&func_name, arguments).expect("error calling function");
+                            },
+                            _ => panic!("attempted to call a non-function."),
+                        }
+                    },
+                    Expr::Function {parameters, body} => (parameters, body),
+                    _ => panic!("attempted to call a non-function."),
+                };
+
+                assert_eq!(parameters.len(), arguments.len(), "called function with wrong number of parameters.");
+
+                let mut env_func = Env::new();
+                for (parameter, arg_value) in parameters.into_iter().zip(arguments.into_iter()) {
+                    env_func.set(parameter, eval_expr(arg_value, env));
+                }
+
+                eval_return_scope(body, &mut env_func)
+            },
             _ => panic!("Not implemented yet!"),
+        }
+    }
+
+    fn eval_builtin(func_name: &str, arguments: Vec<Object>) -> Option<Object> {
+        match (func_name, arguments.as_slice()) {
+            ("len", [Object::String(string)]) => Some(Object::Integer(string.len() as i32)),
+            _ => None,
         }
     }
 
@@ -259,7 +438,16 @@ mod eval {
             Object::Boolean(val) => println!("{}", val),
             Object::Null => println!("null"),
             Object::Return(obj) => display_object(*obj),
+            Object::Function{parameters: _, body: _} => println!("function"),
         }
+    }
+
+    pub fn run(code: &str, env: &mut Env) -> Object {
+        let mut tokens = lex(&code);
+        let parsed = parse(&mut tokens);
+        let obj = eval_return_scope(parsed, env);
+
+        obj
     }
 }
 
@@ -267,15 +455,19 @@ fn main() {
     let mut env = eval::Env::new();
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 {
-        eprintln!("No input file was provided.");
-        std::process::exit(-1);
-    }
-
-    let code = &fs::read_to_string(&args[1]).unwrap();
-
-    let mut tokens = lexer::lex(&code);
-    let parsed = parser::parse(&mut tokens);
-    let evaled = eval::eval_return_scope(parsed, &mut env);
-    eval::display_object(evaled);
+    match &args.len() {
+        1 => {
+            let mut code = String::new();
+            let mut stdin = io::stdin();
+            stdin.read_to_string(&mut code).expect("Could not read from standard input.");
+            let evaled = eval::run(&code, &mut env);
+            eval::display_object(evaled);
+        },
+        2 => {
+            let code = &fs::read_to_string(&args[1]).unwrap();
+            let evaled = eval::run(&code, &mut env);
+            eval::display_object(evaled);
+        },
+        _ => panic!("too many arguments."),
+    };
 }
