@@ -23,8 +23,10 @@ mod lexer {
         SEMICOLON,
         #[token("+")]
         PLUS,
-        #[token("_")]
+        #[token("-")]
         MINUS,
+        #[token("_")]
+        NEGATIVE,
         #[token("/")]
         SLASH,
         #[token("*")]
@@ -53,12 +55,15 @@ mod lexer {
         FALSE,
         #[token("!")]
         BANG,
+        #[token("=")]
+        ASSIGN
     }
 
     pub fn lex(input: &str) -> Vec<Token> {
         let mut tokens = Token::lexer(input).collect::<Vec<Token>>();
         tokens.push(Token::EOF);
 
+        println!("{:?}", tokens);
         tokens
     }
 }
@@ -78,6 +83,7 @@ mod parser {
         Const(i32),
         Function{parameters: Vec<String>, body: Vec<Statement>},
         Ident(String),
+        Assign{ident: Box<Expr>, value: Box<Expr>},
         Operation{operator: Operator, operands: Vec<Expr>},
         Prefix{prefix: Prefix, value: Box<Expr>},
         String(String),
@@ -86,7 +92,7 @@ mod parser {
     #[derive(Debug, PartialEq, Clone)]
     pub enum Prefix {
         Bang,
-        Minus,
+        Negative,
     }
 
     #[derive(Debug, PartialEq, Clone)]
@@ -150,6 +156,19 @@ mod parser {
             Token::ZERO => Expr::Const(0),
             Token::TRUE => Expr::Boolean(true),
             Token::FALSE => Expr::Boolean(false),
+            Token::ASSIGN => {
+                let i = match input.remove(0) {
+                    Token::IDENT(ident) => {
+                        Expr::Ident(ident.to_string())
+                    },
+                    _ => panic!("expecting IDENT after assignment.")
+                };
+                dbg!(&i);
+                Expr::Assign{
+                    ident: Box::new(i),
+                    value: Box::new(parse_expression(input, Precedence::Lowest)),
+                }
+            },
             Token::BANG => Expr::Prefix{
                 prefix: Prefix::Bang,
                 value: Box::new(parse_expression(input, Precedence::Prefix))
@@ -161,7 +180,10 @@ mod parser {
                 expr
             },
             Token::PLUS => parse_operation(Token::PLUS, input),
-            Token::MINUS => parse_operation(Token::MINUS, input),
+            Token::NEGATIVE => Expr::Prefix{
+                prefix: Prefix::Negative,
+                value: Box::new(parse_expression(input, Precedence::Prefix))
+            },
             Token::ASTERISK => parse_operation(Token::ASTERISK, input),
             Token::SLASH => parse_operation(Token::SLASH, input),
             Token::IDENT(ident) => {
@@ -253,6 +275,10 @@ mod parser {
                 Token::MINUS => operands.push(parse_operation(Token::MINUS, input)),
                 Token::ASTERISK => operands.push(parse_operation(Token::ASTERISK, input)),
                 Token::SLASH => operands.push(parse_operation(Token::SLASH, input)),
+                Token::NEGATIVE => operands.push(Expr::Prefix{
+                    prefix: Prefix::Negative,
+                    value: Box::new(parse_expression(input, Precedence::Prefix))
+                }),
                 _ => panic!("could not parse operation, not operating on numbers."),
             }
         }
@@ -309,6 +335,12 @@ mod eval {
                 match eval_expr(*expr, env) {
                     Object::Boolean(boolean) => Object::Boolean(!boolean),
                     _ => panic!("Bang Operator only valid for boolean types.")
+                }
+            },
+            Expr::Prefix{prefix: Prefix::Negative, value: expr} => {
+                match eval_expr(*expr, env) {
+                    Object::Integer(int) => Object::Integer(-int),
+                    _ => panic!("Negative Operator only valid for integer types.")
                 }
             },
             Expr::Operation{operator: Operator::Plus, operands} => {
