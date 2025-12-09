@@ -45,6 +45,8 @@ mod lexer {
         EQ,
         #[token("!=")]
         NOTEQ,
+        #[token("P")]
+        PRINT,
         #[token("F")]
         FUNCTION,
         #[token("true")]
